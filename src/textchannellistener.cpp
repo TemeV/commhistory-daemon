@@ -46,6 +46,8 @@
 #include <TelepathyQt/Contact>
 #include <TelepathyQt/ContactManager>
 #include <TelepathyQt/PendingContacts>
+#include <TelepathyQt/PendingVariant>
+#include <TelepathyQt/PendingVariantMap>
 #include <TelepathyQt/Connection>
 #include <TelepathyQt/Properties>
 #include <TelepathyQt/Presence>
@@ -238,8 +240,42 @@ void TextChannelListener::channelListenerReady()
 {
     DEBUG() << __PRETTY_FUNCTION__;
 
-    if (m_IsGroupChat)
-        handleTpProperties();
+    if (m_IsGroupChat) {
+        if (m_Group.isValid()) {
+            QStringList remoteUids;
+            // For chat rooms the first remote uid is the room's id.
+            if( m_Channel->targetHandleType() == Tp::HandleTypeRoom ) {
+                remoteUids << m_Channel->targetId();
+            }
+            foreach(Tp::ContactPtr contact, m_Channel->groupContacts() ) {
+                remoteUids << contact->id();
+            }
+            m_Group.setRemoteUids(remoteUids);
+
+            if(m_GroupModel) {
+                CommHistory::Group modGroup;
+                modGroup.setId(m_Group.id());
+                modGroup.setRemoteUids(m_Group.remoteUids());
+                if (!m_GroupModel->modifyGroup(modGroup)){
+                    qCritical() << "failed to modify group in database";
+                }
+            } else{
+                qCritical() << "failed to modify group in database";
+            }
+        } else {
+            qCritical() << "failed to get group contacts";
+        }
+
+        if(m_Channel->hasInterface(Tp::Client::ChannelInterfaceRoomConfigInterface::staticInterfaceName()) &&
+            m_Channel->hasInterface(Tp::Client::ChannelInterfaceRoomInterface::staticInterfaceName()))
+        {
+            handleTpRoomProperties();
+        }
+        else if(m_Channel->hasInterface(Tp::Client::DBus::PropertiesInterface::staticInterfaceName()))
+        {
+            handleTpProperties();
+        }
+    }
 
     Tp::TextChannelPtr textChannel = Tp::TextChannelPtr::dynamicCast(m_Channel);
 
@@ -489,6 +525,44 @@ void TextChannelListener::handleTpProperties()
     QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(propertyCall, this);
     connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher *)),
             this, SLOT(slotListPropertiesFinished(QDBusPendingCallWatcher *)));
+}
+
+void TextChannelListener::handleTpRoomProperties()
+{
+    Tp::Client::ChannelInterfaceRoomConfigInterface* roomConfigInterface = m_Channel->interface<Tp::Client::ChannelInterfaceRoomConfigInterface>();
+    connect( roomConfigInterface->requestAllProperties(),
+             SIGNAL(finished(Tp::PendingOperation*)),
+             this,
+             SLOT(slotRequestAllRoomProperies(Tp::PendingOperation*))
+             );
+    Tp::Client::ChannelInterfaceRoomInterface* roomInterface = m_Channel->interface<Tp::Client::ChannelInterfaceRoomInterface>();
+    connect( roomInterface->requestPropertyRoomName(),
+            SIGNAL(finished(Tp::PendingOperation*)),
+            this,
+            SLOT(slotRequestPropertyRoomName(Tp::PendingOperation*))
+            );
+    roomConfigInterface->setMonitorProperties(true);
+    connect( roomConfigInterface,
+             SIGNAL(propertiesChanged(const QVariantMap&, const QStringList&)),
+             this,
+             SLOT(slotRoomPropertiesChanged(const QVariantMap&,const QStringList&))
+             );
+}
+
+void TextChannelListener::processRoomProperties(const QVariantMap &properties)
+{
+    QVariantMap::const_iterator i = properties.constBegin();
+
+    while(i != properties.constEnd()) {
+        if(i.key() == "Title") {
+            QString title = i.value().toString();
+            if( !title.isEmpty() && m_ChannelSubject != title ) {
+                m_ChannelSubject = title;
+                updateGroupChatName( ChannelSubject, false );
+            }
+        }
+        i++;
+    }
 }
 
 void TextChannelListener::slotListPropertiesFinished(QDBusPendingCallWatcher *watcher)
@@ -1783,6 +1857,35 @@ void TextChannelListener::slotPropertiesChanged(const Tp::PropertyValueList &pro
     if (changedProperty != None)
         updateGroupChatName(changedProperty, listProps);
 }
+void TextChannelListener::slotRequestAllRoomProperies(Tp::PendingOperation *operation)
+{
+    DEBUG() << __FUNCTION__;
+
+    QVariantMap properties = dynamic_cast<Tp::PendingVariantMap*>( operation )->result();
+    processRoomProperties(properties);
+}
+
+void TextChannelListener::slotRequestPropertyRoomName(Tp::PendingOperation *operation)
+{
+    DEBUG() << __FUNCTION__;
+
+    QString name = dynamic_cast<Tp::PendingVariant*>( operation )->result().toString();
+
+    if( !name.isEmpty() && m_ChannelName != name )
+    {
+        m_ChannelName = name;
+        if( m_ChannelSubject.isEmpty() )
+        {
+            updateGroupChatName(ChannelName, false);
+        }
+    }
+}
+
+void TextChannelListener::slotRoomPropertiesChanged(const QVariantMap &changedProperties, const QStringList &invalidatedProperties)
+{
+    DEBUG() << __FUNCTION__;
+    processRoomProperties(changedProperties);
+}
 
 void TextChannelListener::slotGroupMembersChanged(
         const Tp::Contacts &groupMembersAdded,
@@ -1798,6 +1901,7 @@ void TextChannelListener::slotGroupMembersChanged(
 
     if (!groupMembersRemoved.isEmpty()) {
 
+        QStringList remoteUids = m_Group.remoteUids();
         foreach (Tp::ContactPtr contact, groupMembersRemoved) {
 
             // if there is valid originatior for the change
@@ -1829,6 +1933,18 @@ void TextChannelListener::slotGroupMembersChanged(
                 sendGroupChatEvent(txt_qtn_msg_group_chat_remote_left(contact->alias()));
                 m_PresenceStatuses.remove(contact->id());
             }
+            remoteUids.removeAll(contact->id());
+        }
+        m_Group.setRemoteUids(remoteUids);
+        if(m_Group.isValid() && m_GroupModel) {
+            CommHistory::Group modGroup;
+            modGroup.setId(m_Group.id());
+            modGroup.setRemoteUids(m_Group.remoteUids());
+            if (!m_GroupModel->modifyGroup(modGroup)){
+                qCritical() << "failed to modify group in database";
+            }
+        } else{
+            qCritical() << "failed to modify group in database";
         }
     }
 
@@ -1865,13 +1981,26 @@ void TextChannelListener::slotJoinedGroupChat(Tp::PendingOperation *operation)
     Tp::PendingContacts* pendingContacts = static_cast<Tp::PendingContacts *>(operation);
     if (pendingContacts) {
         QList<Tp::ContactPtr> contacts(pendingContacts->contacts());
+        QStringList remoteUids = m_Group.remoteUids();
         for (int i = 0; i < contacts.count(); i++) {
             // Ignore self contact. In that case "You have joined..." message
             // should be shown instead (by messaging-ui)
             if (contacts.value(i) != m_Channel->groupSelfContact()) {
                 DEBUG() << contacts.value(i)->alias() << "joined";
                 sendGroupChatEvent(txt_qtn_msg_group_chat_remote_joined(contacts.value(i)->alias()));
+                remoteUids << contacts.value(i)->id();
             }
+        }
+        m_Group.setRemoteUids(remoteUids);
+        if(m_Group.isValid() && m_GroupModel) {
+            CommHistory::Group modGroup;
+            modGroup.setId(m_Group.id());
+            modGroup.setRemoteUids(m_Group.remoteUids());
+            if (!m_GroupModel->modifyGroup(modGroup)){
+                qCritical() << "failed to modify group in database";
+            }
+        } else{
+            qCritical() << "failed to modify group in database";
         }
     }
 }

@@ -42,6 +42,7 @@ namespace Tp {
     class Message;
     class ReceivedMessage;
     class PendingOperation;
+    class PendingVariantMap;
     class Presence;
 
     namespace Client {
@@ -89,6 +90,10 @@ private Q_SLOTS:
     void slotEventsCommitted(QList<CommHistory::Event> events, bool status);
     void slotContactsReady(Tp::PendingOperation* operation);
     void slotPropertiesChanged(const Tp::PropertyValueList &props, bool listProps = false);
+    void slotRequestAllRoomProperies(Tp::PendingOperation *operation);
+    void slotRequestPropertyRoomName(Tp::PendingOperation *operation);
+    void slotRoomPropertiesChanged(const QVariantMap &changedProperties,
+                                   const QStringList &invalidatedProperties);
     void slotGroupMembersChanged(const Tp::Contacts &groupMembersAdded,
                                  const Tp::Contacts &groupLocalPendingMembersAdded,
                                  const Tp::Contacts &groupRemotePendingMembersAdded,
@@ -127,6 +132,8 @@ private:
     int groupId();
     int groupIdForRecipient(const QString& remoteUid);
     void handleTpProperties();
+    void handleTpRoomProperties();
+    void processRoomProperties(const QVariantMap &properties);
 
     // delivery report
     DeliveryHandlingStatus handleDeliveryReport(const Tp::ReceivedMessage &message,
